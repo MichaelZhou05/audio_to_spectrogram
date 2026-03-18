@@ -83,7 +83,8 @@ def generate_spectrogram(audio_path, output_path,
                          freq_min=20000, freq_max=120000,
                          nperseg=512, noverlap=384,
                          target_size=(512, 512),
-                         window_duration=None):
+                         window_duration=None,
+                         window_overlap=0.0):
     """
     Generate a spectrogram from an audio file and save as PNG.
 
@@ -97,23 +98,46 @@ def generate_spectrogram(audio_path, output_path,
         target_size: Output image size (width, height)
         window_duration: If set, process audio in chunks of this duration (seconds)
                         and save multiple spectrograms
+        window_overlap: Overlap between windows as fraction (0.0 to 0.9).
+                       0.5 means 50% overlap - each moment appears in 2 windows.
 
     Returns:
-        List of output file paths created
+        Tuple of (list of output file paths, metadata dict)
     """
     sample_rate, audio_data = read_wav(audio_path)
+    total_duration = len(audio_data) / sample_rate
 
     output_files = []
+    metadata = {
+        'source_file': str(audio_path),
+        'sample_rate': sample_rate,
+        'total_duration': total_duration,
+        'freq_min': freq_min,
+        'freq_max': freq_max,
+        'window_duration': window_duration,
+        'window_overlap': window_overlap,
+        'windows': []
+    }
 
     if window_duration is not None:
-        # Process in chunks
         samples_per_window = int(window_duration * sample_rate)
-        num_windows = int(np.ceil(len(audio_data) / samples_per_window))
+        step_samples = int(samples_per_window * (1 - window_overlap))
+
+        # Ensure step is at least 1 sample
+        step_samples = max(1, step_samples)
+
+        # Calculate number of windows
+        num_windows = max(1, int(np.ceil((len(audio_data) - samples_per_window) / step_samples)) + 1)
 
         for i in range(num_windows):
-            start = i * samples_per_window
-            end = min((i + 1) * samples_per_window, len(audio_data))
-            chunk = audio_data[start:end]
+            start = i * step_samples
+            end = start + samples_per_window
+
+            # Stop if we've gone past the audio
+            if start >= len(audio_data):
+                break
+
+            chunk = audio_data[start:min(end, len(audio_data))]
 
             # Pad last chunk if needed
             if len(chunk) < samples_per_window:
@@ -126,13 +150,29 @@ def generate_spectrogram(audio_path, output_path,
             _save_spectrogram(chunk, sample_rate, str(chunk_output),
                             freq_min, freq_max, nperseg, noverlap, target_size)
             output_files.append(str(chunk_output))
+
+            # Record metadata for this window
+            metadata['windows'].append({
+                'index': i,
+                'filename': chunk_output.name,
+                'start_time': start / sample_rate,
+                'end_time': min(end, len(audio_data)) / sample_rate,
+                'duration': window_duration
+            })
     else:
         # Process entire file as one spectrogram
         _save_spectrogram(audio_data, sample_rate, output_path,
                          freq_min, freq_max, nperseg, noverlap, target_size)
         output_files.append(output_path)
+        metadata['windows'].append({
+            'index': 0,
+            'filename': Path(output_path).name,
+            'start_time': 0,
+            'end_time': total_duration,
+            'duration': total_duration
+        })
 
-    return output_files
+    return output_files, metadata
 
 
 def _save_spectrogram(audio_data, sample_rate, output_path,
@@ -179,7 +219,7 @@ def _save_spectrogram(audio_data, sample_rate, output_path,
     img.save(output_path)
 
 
-def process_directory(input_dir, output_dir, window_duration=1.0, **kwargs):
+def process_directory(input_dir, output_dir, window_duration=1.0, window_overlap=0.0, **kwargs):
     """
     Process all WAV files in a directory.
 
@@ -187,11 +227,14 @@ def process_directory(input_dir, output_dir, window_duration=1.0, **kwargs):
         input_dir: Directory containing WAV files
         output_dir: Directory for output PNG files
         window_duration: Duration of each spectrogram window in seconds
+        window_overlap: Overlap between windows (0.0 to 0.9)
         **kwargs: Additional arguments passed to generate_spectrogram
 
     Returns:
         Dictionary mapping input files to list of output files
     """
+    import json
+
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -199,6 +242,7 @@ def process_directory(input_dir, output_dir, window_duration=1.0, **kwargs):
     wav_files = list(input_path.glob('*.wav')) + list(input_path.glob('*.WAV'))
 
     results = {}
+    all_metadata = {}
     total_spectrograms = 0
 
     for wav_file in wav_files:
@@ -208,18 +252,26 @@ def process_directory(input_dir, output_dir, window_duration=1.0, **kwargs):
         output_file = output_path / f"{wav_file.stem}.png"
 
         try:
-            output_files = generate_spectrogram(
+            output_files, metadata = generate_spectrogram(
                 str(wav_file),
                 str(output_file),
                 window_duration=window_duration,
+                window_overlap=window_overlap,
                 **kwargs
             )
             results[str(wav_file)] = output_files
+            all_metadata[wav_file.stem] = metadata
             total_spectrograms += len(output_files)
             print(f"  -> Generated {len(output_files)} spectrogram(s)")
         except Exception as e:
             print(f"  -> ERROR: {e}")
             results[str(wav_file)] = []
+
+    # Save metadata JSON for post-processing
+    metadata_file = output_path / "spectrogram_metadata.json"
+    with open(metadata_file, 'w') as f:
+        json.dump(all_metadata, f, indent=2)
+    print(f"Metadata saved to: {metadata_file}")
 
     print(f"\nProcessed {len(wav_files)} audio files -> {total_spectrograms} spectrograms")
     return results
@@ -241,6 +293,9 @@ def main():
     parser.add_argument('--window_duration', '-w', type=float, default=1.0,
                         help='Duration of each spectrogram window in seconds. '
                              'Set to 0 to process entire file as single spectrogram.')
+    parser.add_argument('--window_overlap', type=float, default=0.0,
+                        help='Overlap between windows as fraction (0.0 to 0.9). '
+                             'Use 0.5 for 50%% overlap to handle calls at boundaries.')
     parser.add_argument('--nperseg', type=int, default=512,
                         help='FFT window size (samples)')
     parser.add_argument('--noverlap', type=int, default=384,
@@ -252,12 +307,17 @@ def main():
 
     window_duration = args.window_duration if args.window_duration > 0 else None
 
+    # Validate overlap
+    if args.window_overlap < 0 or args.window_overlap >= 1.0:
+        parser.error("--window_overlap must be between 0.0 and 0.9")
+
     process_directory(
         args.input_dir,
         args.output_dir,
         freq_min=args.freq_min,
         freq_max=args.freq_max,
         window_duration=window_duration,
+        window_overlap=args.window_overlap,
         nperseg=args.nperseg,
         noverlap=args.noverlap,
         target_size=(args.target_size, args.target_size)
