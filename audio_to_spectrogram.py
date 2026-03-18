@@ -11,15 +11,72 @@ Usage:
 For USV recordings, typical parameters:
     - Sample rate: 250 kHz (common for mouse USV recordings)
     - Frequency range: 20-120 kHz (covers typical mouse USV range)
+
+Dependencies: numpy, Pillow (no scipy required)
 """
 
 import os
 import argparse
+import struct
+import wave
 import numpy as np
-from scipy import signal
-from scipy.io import wavfile
 from PIL import Image
 from pathlib import Path
+
+
+def read_wav(filepath):
+    """Read a WAV file and return sample rate and audio data as float32 array."""
+    with wave.open(filepath, 'rb') as wav_file:
+        sample_rate = wav_file.getframerate()
+        n_channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        n_frames = wav_file.getnframes()
+
+        raw_data = wav_file.readframes(n_frames)
+
+        if sample_width == 2:  # 16-bit
+            fmt = f'<{n_frames * n_channels}h'
+            audio_data = np.array(struct.unpack(fmt, raw_data), dtype=np.float32) / 32768.0
+        elif sample_width == 4:  # 32-bit
+            fmt = f'<{n_frames * n_channels}i'
+            audio_data = np.array(struct.unpack(fmt, raw_data), dtype=np.float32) / 2147483648.0
+        elif sample_width == 1:  # 8-bit
+            audio_data = np.frombuffer(raw_data, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
+        else:
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+
+        # Handle stereo by taking first channel
+        if n_channels > 1:
+            audio_data = audio_data[::n_channels]
+
+    return sample_rate, audio_data
+
+
+def compute_spectrogram(audio_data, sample_rate, nperseg=512, noverlap=384):
+    """Compute spectrogram using numpy FFT (no scipy required)."""
+    step = nperseg - noverlap
+
+    # Ensure we have enough data
+    if len(audio_data) < nperseg:
+        audio_data = np.pad(audio_data, (0, nperseg - len(audio_data)))
+
+    n_segments = max(1, (len(audio_data) - nperseg) // step + 1)
+
+    # Hann window
+    window = 0.5 * (1 - np.cos(2 * np.pi * np.arange(nperseg) / nperseg))
+
+    # Compute STFT
+    spectrogram = np.zeros((nperseg // 2 + 1, n_segments))
+    for i in range(n_segments):
+        start = i * step
+        segment = audio_data[start:start + nperseg] * window
+        fft_result = np.fft.rfft(segment)
+        spectrogram[:, i] = np.abs(fft_result) ** 2
+
+    # Frequency bins
+    frequencies = np.fft.rfftfreq(nperseg, 1.0 / sample_rate)
+
+    return frequencies, spectrogram
 
 
 def generate_spectrogram(audio_path, output_path,
@@ -44,17 +101,7 @@ def generate_spectrogram(audio_path, output_path,
     Returns:
         List of output file paths created
     """
-    sample_rate, audio_data = wavfile.read(audio_path)
-
-    # Handle stereo by taking first channel
-    if len(audio_data.shape) > 1:
-        audio_data = audio_data[:, 0]
-
-    # Convert to float
-    if audio_data.dtype == np.int16:
-        audio_data = audio_data.astype(np.float32) / 32768.0
-    elif audio_data.dtype == np.int32:
-        audio_data = audio_data.astype(np.float32) / 2147483648.0
+    sample_rate, audio_data = read_wav(audio_path)
 
     output_files = []
 
@@ -91,18 +138,18 @@ def generate_spectrogram(audio_path, output_path,
 def _save_spectrogram(audio_data, sample_rate, output_path,
                       freq_min, freq_max, nperseg, noverlap, target_size):
     """Generate and save a single spectrogram."""
-    # Compute spectrogram
-    frequencies, times, Sxx = signal.spectrogram(
-        audio_data,
-        fs=sample_rate,
-        nperseg=nperseg,
-        noverlap=noverlap,
-        window='hann'
-    )
+    # Compute spectrogram using numpy
+    frequencies, Sxx = compute_spectrogram(audio_data, sample_rate, nperseg, noverlap)
 
     # Filter to frequency range of interest
     freq_mask = (frequencies >= freq_min) & (frequencies <= freq_max)
     Sxx_filtered = Sxx[freq_mask, :]
+
+    # Handle edge case of empty frequency range
+    if Sxx_filtered.size == 0:
+        print(f"  Warning: No frequencies in range {freq_min}-{freq_max} Hz. "
+              f"Sample rate may be too low. Max freq: {frequencies[-1]:.0f} Hz")
+        Sxx_filtered = Sxx
 
     # Convert to dB scale
     Sxx_db = 10 * np.log10(Sxx_filtered + 1e-10)
@@ -118,7 +165,14 @@ def _save_spectrogram(audio_data, sample_rate, output_path,
 
     # Convert to PIL Image and resize
     img = Image.fromarray(Sxx_uint8, mode='L')
-    img = img.resize(target_size, Image.Resampling.LANCZOS)
+
+    # Use LANCZOS if available, otherwise fall back to ANTIALIAS for older Pillow
+    try:
+        resample = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.ANTIALIAS
+
+    img = img.resize(target_size, resample)
 
     # Save
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
