@@ -194,8 +194,12 @@ def _save_spectrogram(audio_data, sample_rate, output_path,
     # Convert to dB scale
     Sxx_db = 10 * np.log10(Sxx_filtered + 1e-10)
 
-    # Normalize to 0-255 for image
-    Sxx_normalized = Sxx_db - Sxx_db.min()
+    # Normalize to 0-255 using percentile clipping for better contrast.
+    # Min/max normalization is sensitive to outliers; clipping at 2nd/98th
+    # percentile suppresses noise floor and hot pixels common in USV recordings.
+    p_low, p_high = np.percentile(Sxx_db, [2, 98])
+    Sxx_clipped = np.clip(Sxx_db, p_low, p_high)
+    Sxx_normalized = Sxx_clipped - Sxx_clipped.min()
     if Sxx_normalized.max() > 0:
         Sxx_normalized = Sxx_normalized / Sxx_normalized.max()
     Sxx_uint8 = (Sxx_normalized * 255).astype(np.uint8)
