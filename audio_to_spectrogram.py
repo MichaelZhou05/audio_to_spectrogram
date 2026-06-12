@@ -10,7 +10,7 @@ Usage:
 
 For USV recordings, typical parameters:
     - Sample rate: 250 kHz (common for mouse USV recordings)
-    - Frequency range: 20-120 kHz (covers typical mouse USV range)
+    - Frequency range: 30-130 kHz (covers typical mouse USV range)
 
 Dependencies: numpy, Pillow (no scipy required)
 """
