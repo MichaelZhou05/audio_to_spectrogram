@@ -25,7 +25,7 @@ from pathlib import Path
 
 
 def read_wav(filepath):
-    """Read a WAV file and return sample rate and audio data as float32 array."""
+    """Read a WAV file and return (sample_rate, audio_data) as float32 mono array."""
     with wave.open(filepath, 'rb') as wav_file:
         sample_rate = wav_file.getframerate()
         n_channels = wav_file.getnchannels()
