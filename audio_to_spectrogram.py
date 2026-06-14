@@ -53,7 +53,7 @@ def read_wav(filepath):
 
 
 def compute_spectrogram(audio_data, sample_rate, nperseg=512, noverlap=384):
-    """Compute spectrogram using numpy FFT (no scipy required)."""
+    """Compute power spectrogram via numpy FFT (no scipy required); returns (frequencies, spectrogram)."""
     step = nperseg - noverlap
 
     # Ensure we have enough data
